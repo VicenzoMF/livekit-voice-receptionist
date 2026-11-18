@@ -1,0 +1,19 @@
+# Segredos
+.env
+.env.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+
+# Editor / SO
+.vscode/
+.DS_Store
+
+# PDF do enunciado (opcional; não precisa ir pro repo)
+AI_Voice_agents_Test_Project.pdf
