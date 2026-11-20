@@ -22,7 +22,7 @@ class AgentConfig(BaseModel):
   greeting: str = "Thanks for calling Bright Smile Dental, this is Sarah. How can I help you today?"
   voice: str = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
   instructions: str = DEFAULT_INSTRUCTIONS
-  enabled_tools: list[str] = Field(default_factory=list)
+  enabled_tools: list[str] = Field(default_factory=lambda: ["check_availability", "book_appointment"])
 
 def load_config() -> AgentConfig:
   if not CONFIG_PATH.exists():
