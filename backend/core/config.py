@@ -18,10 +18,10 @@ How you speak:
 """
 
 class AgentConfig(BaseModel):
-  agent_name: str = "Sarah"
-  greeting: str = "Thanks for calling Bright Smile Dental, this is Sarah. How can I help you today?"
+  agent_name: str = Field("Sarah", min_length=1, max_length=40)
+  greeting: str = Field("Thanks for calling Bright Smile Dental, this is Sarah. How can I help you today?", min_length=1)
   voice: str = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-  instructions: str = DEFAULT_INSTRUCTIONS
+  instructions: str = Field(DEFAULT_INSTRUCTIONS, min_length=1)
   enabled_tools: list[str] = Field(default_factory=lambda: ["check_availability", "book_appointment"])
 
 def load_config() -> AgentConfig:
