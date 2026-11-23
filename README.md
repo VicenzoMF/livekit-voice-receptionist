@@ -2,8 +2,6 @@
 
 A real-time voice agent built with the LiveKit Agents SDK (Python). It answers the phone for a dental clinic, plus a small React admin UI to configure it.
 
-> **Status: draft.** The sections marked _TODO_ are not finished yet.
-
 - **Agent:** "Sarah", the receptionist. She checks availability, books appointments, transfers to a human and ends the call.
 - **Admin UI:** edit the system prompt, name, greeting and voice, and turn the business tools on or off. Changes apply on the next call.
 - **Bonus: evals.** An automated test suite of agent behavior, run against the real LLM. See [Evals](#bonus-evals).
@@ -42,29 +40,95 @@ The three LiveKit keys also cover STT, LLM and TTS through LiveKit Inference, so
 
 ## What I built and why
 
-_TODO: write up the full reasoning._ Key decisions so far:
+### The use case: a dental clinic receptionist
 
-- **Stack:** Deepgram nova-3 (STT), gpt-4.1-mini (LLM), Cartesia sonic-3 (TTS), Silero VAD and the LiveKit turn detector, all through LiveKit Inference.
-- **Config is reloaded on every call.** `entrypoint` reads `data/config.json` when a call starts, so a save in the admin applies to the next call without a restart. Calls already in progress keep the config they started with.
-- **Operators control personality and business tools; the platform controls safety.** The prompt, persona and scheduling tools can be edited in the UI. `SAFETY_RULES`, `transfer_to_human` and `end_call` are always added in code and can't be removed from the UI.
+I picked a receptionist because it covers the three kinds of tools a phone agent needs:
+- **looking something up:** `check_availability`;
+- **taking an action with side effects:** `book_appointment`;
+- **routing the caller:** `transfer_to_human` and `end_call`.
+
+A dental clinic also brings a real safety problem. Callers describe symptoms, ask whether something is "normal" and occasionally have a real emergency. The guardrail work is about real risk, not a checkbox.
+
+### A typical call
+
+1. Sarah greets the caller and asks what the visit is for and which day works.
+2. She checks availability and offers at most three times. When the caller picks one, she confirms it out loud.
+3. She collects the name and phone number, asking only for what's missing.
+4. She reads everything back in one sentence and books only after a "yes".
+
+Besides booking:
+- Anything clinic-related she can't do, like billing or records: she asks first, then transfers.
+- Off-topic questions: she declines and steers back to the clinic.
+- "Bye": she ends the call.
+
+### Voice is not text
+
+The caller has no screen and no scrollback, and everything the LLM writes gets spoken. Most of the work went into this:
+
+- **Short turns and one question at a time.** A paragraph that reads fine in a chat is 20 seconds of monologue on the phone.
+- **Write for the ear.**
+  - Times like "two thirty", not "14:30"; dates like "Tuesday the twenty-fourth", not "2026-11-24".
+  - Phone numbers in spoken digit groups, including when the caller asks to repeat them.
+  - No markdown or lists, since TTS would read the symbols aloud.
+  - The evals check these rules (no `:` in spoken times, no 3+ digit runs).
+- **Confirm every step out loud.** On the phone, the only way the caller knows the agent got it right is to hear it. That's why the booking flow ends with a full read-back before booking.
+- **Never leave silence.** Before calling a tool, the agent says something like "let me check that for you" in the same turn. The greeting uses `session.say`, so it plays right away without waiting on the LLM.
+- **Handle the silent caller.** If the caller goes quiet (`user_state_changed` → `away`), Sarah asks "are you still there?" once, then says goodbye and hangs up.
+- **Turn detection matters more than the LLM.** The LiveKit turn detector model tells a pause in the middle of a sentence from the end of a turn. In one test call it waited about 3 s while I paused mid-sentence, instead of the usual ~0.5 s, so Sarah didn't cut me off.
+
+### Architecture decisions
+
+- **Stack:** Deepgram nova-3 (STT), gpt-4.1-mini (LLM), Cartesia sonic-3 (TTS), Silero VAD and the LiveKit turn detector, all through LiveKit Inference. One set of keys, and every model can be swapped by changing a string. gpt-4.1-mini is fast enough for voice; its weaknesses (date math, multi-step instructions) showed up in the evals and were fixed in the prompt and context, not by switching to a bigger model.
+- **Config is reloaded on every call.** `entrypoint` reads `data/config.json` when a call starts, so a save in the admin applies to the next call without a restart. Calls already in progress keep the config they started with: switching a persona's voice mid-call would be worse than waiting. A JSON file with an atomic write (`os.replace`) is enough for one user; with a database only `load_config`/`save_config` would change.
+- **Operators control personality and business tools; the platform controls safety.**
+  - The prompt, persona and scheduling tools can be edited in the UI.
+  - `SAFETY_RULES`, `transfer_to_human` and `end_call` are always added in code and can't be removed from the UI.
+  - On a multi-tenant platform, a customer editing their prompt must not be able to delete the emergency instructions or the way out to a human.
 - **Two-layer emergency guardrail.**
-  1. A deterministic regex runs in `on_user_turn_completed`, *before* the LLM. On a match it speaks a fixed 911 message and stops the LLM with `StopResponse`.
+  1. A deterministic regex runs in `on_user_turn_completed`, *before* the LLM. On a match it speaks a fixed 911 message and stops the LLM with `StopResponse`. This is fast and predictable, and the LLM can't talk its way around it.
   2. `SAFETY_RULES` in the prompt is the second layer, for phrasings the regex misses. If the regex check itself crashes, the call falls back to layer 2 instead of going silent.
-- **One `build_agent(config)` factory** ([backend/voice/factory.py](backend/voice/factory.py)) is shared by real calls and by the evals, so the tests run against the same agent that takes calls.
+- **Adding a business tool is two lines.** Write a `@function_tool` and add it to `TOOL_REGISTRY` in [voice/tools/\_\_init\_\_.py](backend/voice/tools/__init__.py). The API lists it, the UI shows a checkbox with the docstring's first paragraph as its description, and `build_agent` enables it when it's checked.
+- **One `build_agent(config)` factory** ([backend/voice/factory.py](backend/voice/factory.py)) is shared by real calls and by the evals, so the tests run against the same agent that takes calls. It also adds today's date and a 14-day calendar to the prompt (bug 6 below).
+- **Tool errors tell the LLM how to recover.** For example, `ToolError("That time was just taken. Check availability again and offer another time.")`. A generic exception would leave the model guessing what to say to the caller.
 - **Voice is a dropdown, not a free-text ID.** An invalid Cartesia voice ID doesn't crash anything: the TTS just produces no audio and the call goes silent. The API rejects unknown IDs (422), and every ID in [core/voices.py](backend/core/voices.py) was checked by synthesizing real audio.
-- **The greeting uses `session.say`**, with no LLM round-trip, so the caller hears something immediately.
+- **Mocks where the task allows them.** The schedule is in memory, and the transfer is simulated (it logs a reason and a summary for the staff member, then ends the call). Both keep the tool interface a real integration would use.
+
+### What worked and what didn't
+
+- **Worked:**
+  - The two-layer safety design.
+  - Spoken-format rules (the agent reliably says "nine AM").
+  - Corrections in the middle of a call: the caller fixes a digit and the agent reads the corrected number back.
+  - Ending the call on a wrong-number "bye".
+- **Didn't work at first:** prompt rules that compete. "Transfer when you can't help" made the agent transfer on "what's the capital of France?". Each fix risked breaking another rule, which is why I chose evals as the bonus. The [bug log](#bug-log) has the full list.
 
 ## What I like about LiveKit
 
-_TODO: expand._ LiveKit Inference (one set of keys gives a working pipeline in minutes), the turn detector, false-interruption resume, the built-in `EndCallTool`, `prewarm`, and a testing API (`session.run()` + `judge`) that made the evals bonus cheap to build.
+- **LiveKit Inference.** One set of keys gives a full STT → LLM → TTS pipeline, and swapping a provider means changing a string like `"cartesia/sonic-3:<voice>"`. It's the main reason setup takes under five minutes.
+- **The voice plumbing is done for you,** and well:
+  - The turn detector model, on top of VAD.
+  - Interruption handling, including resuming after a *false* interruption (a cough or "mm-hm" doesn't kill the agent's sentence).
+  - Automatic retry and reconnect when the STT/TTS websocket drops. My network was flaky during development, and calls survived it.
+- **Hooks in the right places.** `on_user_turn_completed` runs between the end of the caller's turn and the LLM, exactly where a deterministic guardrail belongs. `StopResponse` cancels the reply cleanly.
+- **Small built-ins that save real work:** `EndCallTool`, `session.say`, `prewarm` (VAD is loaded once per process, not per call) and `ToolError`.
+- **A testing API in the SDK.** `session.run()`, `result.expect`, `judge()` and `mock_tools` made the evals bonus a matter of hours. Testing voice agents is hard, and having this built in is a strong signal about the framework.
 
 ## What I'd improve with more time
 
-_TODO: expand._
-- A real scheduling API behind the same tool interface (the mock is in-memory and resets on restart), and a real SIP transfer.
-- A small classifier instead of the emergency regex.
-- Audio-level evals (TTS → STT round trip) to cover what text evals can't.
-- An LLM-driven simulated caller for multi-turn evals.
+- **Real integrations behind the same tool interfaces:**
+  - A scheduling API instead of the in-memory mock, which resets on restart and has no concurrency control.
+  - A real SIP transfer that passes the summary to the staff member.
+- **A safer emergency check.** The regex is English-only and narrow. In production it would be a small, fast classifier still running *before* the LLM, with the regex kept as a backstop.
+- **Hard guarantees for spoken format.** A TTS text transform that turns any remaining digits or times in the text into words, instead of trusting the prompt alone (bugs 4 and 11).
+- **Latency.** Measure time to first audio per stage (end of turn → LLM first token → TTS first byte) with LiveKit metrics, then try preemptive generation and a filler while slow tools run. During development I saw multi-second gaps, mostly from my network, but I didn't separate that from pipeline time.
+- **Evals:**
+  - An LLM-driven simulated caller instead of the small rule-based one.
+  - Audio-level tests (TTS → STT round trip), to cover what text evals can't: transcription errors, interruptions, turn detection.
+  - Running the evals in CI on every prompt change, and showing pass rates in the admin before a prompt is saved.
+- **Admin UI:**
+  - A "test call" button.
+  - A diff and history of prompt versions.
+  - A warning when an edited prompt drops a step the evals depend on.
 
 ---
 
@@ -76,7 +140,9 @@ uv run pytest -v            # each test once, ~25 s
 uv run pytest --count 5     # each test 5x: measures flakiness, not just pass/fail
 ```
 
-**Why evals.** The other bugs in the log below were found by calling the agent by hand, and each prompt fix risked breaking another rule. On a platform where operators edit prompts in a UI, evals are the safety net: they check that the agent still behaves after someone changes the prompt. The tests load the *saved* config, so a bad prompt edit makes them fail.
+### Why I picked this bonus
+
+The other bugs in the log below were found by calling the agent by hand, and each prompt fix risked breaking another rule. On a platform where operators edit prompts in a UI, evals are the safety net: they check that the agent still behaves after someone changes the prompt. The tests load the *saved* config, so a bad prompt edit makes them fail.
 
 **What's covered** (runs against the real LLM through a text-only `AgentSession`):
 
