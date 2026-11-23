@@ -2,13 +2,7 @@ from dotenv import load_dotenv
 from livekit.agents import AgentServer, AgentSession, JobProcess, JobContext, cli, inference
 from livekit.plugins import silero
 from core.config import load_config
-from voice.tools import TOOL_REGISTRY
-import datetime as dt
-
-from voice.assistant import Receptionist
-from voice.guardrails import SAFETY_RULES
-from voice.tools.call_control import transfer_to_human
-from livekit.agents.beta import EndCallTool
+from voice.factory import LLM_MODEL, build_agent
 
 
 load_dotenv(".env.local")
@@ -24,28 +18,15 @@ server.setup_fnc = prewarm
 async def entrypoint(ctx: JobContext) -> None:
   config = load_config()
 
-  business_tools = [TOOL_REGISTRY[n] for n in config.enabled_tools if n in TOOL_REGISTRY]
-  tools = [*business_tools, transfer_to_human, EndCallTool()]
-
-  today = dt.date.today()
-
   session = AgentSession(
     stt="deepgram/nova-3",
-    llm="openai/gpt-4.1-mini",
+    llm=LLM_MODEL,
     tts=f"cartesia/sonic-3:{config.voice}",
     vad=ctx.proc.userdata["vad"],
     turn_handling={"turn_detection": inference.TurnDetector()},
   )
 
-  agent = Receptionist(
-    instructions=(
-      f"Your name is {config.agent_name}.\n"
-      f"Today is {today:%A, %B %d, %Y}.\n\n"
-      f"{config.instructions}\n\n"
-      f"{SAFETY_RULES}"
-    ),
-    tools=tools,
-  )
+  agent = build_agent(config)
 
   # caller went silent: check in once, then hang up politely
   away_count = 0
