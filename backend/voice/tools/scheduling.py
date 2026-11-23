@@ -1,6 +1,9 @@
 import datetime as dt
+import logging
 
 from livekit.agents import ToolError, function_tool
+
+logger = logging.getLogger("receptionist")
 
 CLINIC_SLOTS = ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"]
 
@@ -63,5 +66,5 @@ async def book_appointment(
     raise ToolError("That time was just taken. Check availability again and offer another time.")
 
   taken.add(time)
-  print(f"[BOOKED] {patient_name} | {phone_number} | {day} {time} | {reason}")
+  logger.info("BOOKED %s | %s | %s %s | %s", patient_name, phone_number, day, time, reason)
   return f"Booked {patient_name} on {day:%A, %B %d} at {time}."
